@@ -1,0 +1,27 @@
+# Build outputs
+build/
+.gradle/
+*.jar
+*.class
+
+# IDE files
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+*.md
+docs/
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Test results
+test-results/
