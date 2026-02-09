@@ -2,6 +2,9 @@
 
 Real-time rocket telemetry processing with out-of-order message handling.
 
+Simple Architecture: `main` branch
+Modular Architecture: `modular-async-architecture` branch
+
 ## Running with Docker Compose
 
 ### Prerequisites
