@@ -383,3 +383,128 @@ sealed interface RocketEvent
 │ ✓ Pattern matching safety               │
 └─────────────────────────────────────────┘
 ```
+
+---
+
+## Mature Architecture
+
+### Multi-Module Design (Platform-Ready)
+
+The system is architected as **two independent modules** with clear boundaries, positioning the sequencer as a reusable platform component.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        LUNAR PLATFORM                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ┌──────────────────┐              ┌──────────────────┐        │
+│  │   APP MODULE     │              │  SEQUENCER MODULE│        │
+│  │  (Domain-Specific)│             │  (Generic/Reusable)       │
+│  │                  │              │                  │        │
+│  │  RocketService   │◄─── uses ───│  Sequenceable    │        │
+│  │  RocketState     │              │  SequencedMessage│        │
+│  │  RocketEvent     │              │  SequencerWorker │        │
+│  │  PostgreSQL      │              │  StashManager    │        │
+│  └────────┬─────────┘              └────────┬─────────┘        │
+│           │                                 │                  │
+│           │  Fire-and-Forget API           │  Redis Streams   │
+│           └────────────┬────────────────────┘                  │
+│                        │                                       │
+│                        ▼                                       │
+│              ┌──────────────────┐                              │
+│              │  Redis (Shared)  │                              │
+│              │  - Streams       │                              │
+│              │  - Sorted Sets   │                              │
+│              │  - Counters      │                              │
+│              └──────────────────┘                              │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Module Boundaries
+
+#### Sequencer Module (Platform-Level)
+- **Purpose:** Generic ordered message processing framework
+- **Exports:** `Sequenceable` interface, `SequencedMessage`, `RedisSequencer`
+- **Dependencies:** Redis, Lettuce, Kotlin coroutines
+- **Domain Knowledge:** **ZERO** - knows nothing about rockets
+- **Reusability:** **100%** - can sequence any domain (orders, trades, payments, events)
+
+**Key Characteristic:** The sequencer has no imports from the app module and no knowledge of rocket telemetry.
+
+#### App Module (Domain-Specific)
+- **Purpose:** Rocket telemetry business logic
+- **Exports:** HTTP API, RocketService
+- **Dependencies:** Sequencer module, PostgreSQL, Exposed, Ktor
+- **Domain Knowledge:** Rockets, missions, speeds, explosions
+- **Reusability:** Domain-specific
+
+---
+
+### Fire-and-Forget Pattern
+
+The architecture implements a **fire-and-forget ingress** pattern for low-latency, high-throughput message acceptance.
+
+```
+┌──────────┐         ┌─────────────┐         ┌──────────────┐
+│  Client  │         │  RocketRoutes│        │  Sequencer   │
+│          │         │  (API Layer) │        │   Module     │
+└────┬─────┘         └──────┬──────┘         └──────┬───────┘
+     │                      │                       │
+     │ POST /messages       │                       │
+     │  {channel, msgNum}   │                       │
+     ├─────────────────────►│                       │
+     │                      │                       │
+     │                      │ publish(msg)          │
+     │                      ├──────────────────────►│
+     │                      │                       │ XADD → Redis
+     │                      │ entryId               │ ─────────┐
+     │                      │◄──────────────────────┤          │
+     │                      │                       │          ▼
+     │ 202 Accepted         │                       │    [Redis Stream]
+     │◄─────────────────────┤                       │
+     │                      │                       │
+     │  ⏱️  ~2ms latency    │                       │
+     │                      │                       │
+     │                      │                       │ (Async)
+     │                      │                       │ ┌────────────┐
+     │                      │                       │ │ Sequencing │
+     │                      │                       │ │ Stash/Drain│
+     │                      │                       │ │ Emit       │
+     │                      │                       │ └─────┬──────┘
+     │                      │                       │       │
+     │                      │                       │       ▼
+     │                      │        ┌──────────────┴──────────┐
+     │                      │        │ OrderedMessageConsumer  │
+     │                      │        │  (Bridge)               │
+     │                      │        └──────────┬──────────────┘
+     │                      │                   │
+     │                      │                   ▼
+     │                      │        ┌────────────────────┐
+     │                      │        │  RocketService     │
+     │                      │        │  (Business Logic)  │
+     │                      │        └──────────┬─────────┘
+     │                      │                   │
+     │                      │                   ▼
+     │                      │            [PostgreSQL]
+```
+
+**Fire-and-Forget Benefits:**
+
+1. **Low Latency:** Client receives 202 Accepted in ~2ms (not waiting for processing)
+2. **Resilience:** Message durably persisted in Redis before client response
+3. **Decoupling:** API tier scales independently of processing tier
+4. **Scalability:** Processing can scale horizontally without affecting ingress
+
+**Key Insight:** The client never waits for business logic execution. Message acceptance (Redis XADD) is separated from message processing (sequencing + domain logic).
+
+---
+
+**Platform Benefits:**
+
+| Benefit | Description |
+|---------|-------------|
+| **Single Implementation** | One battle-tested sequencer for all services |
+| **Consistent Guarantees** | Exactly-once, in-order processing across platform |
+| **Centralized Monitoring** | Unified observability for sequencing layer |
+| **Shared Infrastructure** | Efficient use of Redis resources |
+| **Faster Development** | New services get ordering guarantees for free |
